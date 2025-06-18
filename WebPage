@@ -1,0 +1,90 @@
+import requests
+from bs4 import BeautifulSoup
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
+import faiss
+import numpy as np
+import re
+
+# Step 1: Scrape and clean text from a URL
+def scrape_text_from_url(url):
+    print(f"Scraping: {url}")
+    response = requests.get(url)
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    # Remove scripts and styles
+    for script in soup(["script", "style"]):
+        script.extract()
+
+    # Get text and clean whitespace
+    text = soup.get_text()
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+# Step 2: Chunk the text into small passages
+def chunk_text(text, chunk_size=200):
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    chunks = []
+    current = ""
+    for sentence in sentences:
+        if len(current) + len(sentence) < chunk_size:
+            current += " " + sentence
+        else:
+            chunks.append(current.strip())
+            current = sentence
+    if current:
+        chunks.append(current.strip())
+    return chunks
+
+# Step 3: Embed and index the content
+def build_index(chunks):
+    print("Embedding text and building index...")
+    embeddings = embedder.encode(chunks, convert_to_numpy=True)
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+    return index, chunks
+
+# Step 4: Retrieve top-k chunks
+def retrieve(query, index, chunks, top_k=3):
+    query_vec = embedder.encode([query], convert_to_numpy=True)
+    distances, indices = index.search(query_vec, top_k)
+    return [chunks[i] for i in indices[0]]
+
+# Load models
+print("Loading models...")
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
+qa_extractor = pipeline("question-answering", model="deepset/roberta-base-squad2")
+
+# URLs to scrape
+urls = [
+    "https://lilianweng.github.io/posts/2023-06-23-agent/"
+]
+
+# Main pipeline
+all_chunks = []
+for url in urls:
+    text = scrape_text_from_url(url)
+    chunks = chunk_text(text)
+    all_chunks.extend(chunks)
+
+index, chunks_db = build_index(all_chunks)
+
+# Ask a single question
+query = input("\nAsk a question: ")
+
+# Retrieve relevant chunks
+top_chunks = retrieve(query, index, chunks_db)
+
+print("\nRetrieved context chunks:")
+for c in top_chunks:
+    print(f"- {c}\n")
+
+# Combine retrieved chunks into one context string
+context = " ".join(top_chunks)
+
+# Use extractive QA to find exact answer span
+result = qa_extractor(question=query, context=context)
+
+print(f"\nExtracted answer: {result['answer']}")
+print(f"Answer score (confidence): {result['score']:.4f}")
