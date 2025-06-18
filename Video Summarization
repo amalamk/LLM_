@@ -1,0 +1,104 @@
+pip install pytube openai-whisper sentence-transformers transformers faiss-cpu
+
+import os
+from pytube import YouTube
+import whisper
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
+import faiss
+import numpy as np
+import re
+
+# Step 1: Download audio from YouTube video
+def download_audio(youtube_url, output_path="video_audio.mp4"):
+    print(f"Downloading audio from: {youtube_url}")
+    yt = YouTube(youtube_url)
+    audio_stream = yt.streams.filter(only_audio=True).first()
+    audio_stream.download(filename=output_path)
+    print(f"Audio downloaded to {output_path}")
+    return output_path
+
+# Step 2: Transcribe audio using Whisper
+def transcribe_audio(audio_path):
+    print("Loading Whisper model...")
+    model = whisper.load_model("base")
+    print(f"Transcribing audio from {audio_path} ...")
+    result = model.transcribe(audio_path)
+    transcript = result["text"]
+    print("Transcription complete.")
+    return transcript
+
+# Step 3: Chunk transcript text
+def chunk_text(text, chunk_size=200):
+    sentences = re.split(r'(?<=[.!?]) +', text)
+    chunks = []
+    current = ""
+    for sentence in sentences:
+        if len(current) + len(sentence) < chunk_size:
+            current += " " + sentence
+        else:
+            chunks.append(current.strip())
+            current = sentence
+    if current:
+        chunks.append(current.strip())
+    return chunks
+
+# Step 4: Embed and index chunks
+def build_index(chunks, embedder):
+    print("Embedding text and building index...")
+    embeddings = embedder.encode(chunks, convert_to_numpy=True)
+    dimension = embeddings.shape[1]
+    index = faiss.IndexFlatL2(dimension)
+    index.add(embeddings)
+    return index, chunks
+
+# Step 5: Retrieve top-k chunks
+def retrieve(query, index, chunks, embedder, top_k=3):
+    query_vec = embedder.encode([query], convert_to_numpy=True)
+    distances, indices = index.search(query_vec, top_k)
+    return [chunks[i] for i in indices[0]]
+
+def main():
+    youtube_url = input("Enter YouTube video URL: ")
+    
+    # Download audio
+    audio_path = download_audio(youtube_url)
+
+    # Transcribe audio to text
+    transcript = transcribe_audio(audio_path)
+
+    # Optional: delete audio file after transcription
+    os.remove(audio_path)
+
+    # Load embedder and QA model
+    print("Loading models...")
+    embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    qa_extractor = pipeline("question-answering", model="deepset/roberta-base-squad2")
+
+    # Chunk transcript
+    chunks = chunk_text(transcript)
+
+    # Build index
+    index, chunks_db = build_index(chunks, embedder)
+
+    # Ask a single question
+    query = input("\nAsk a question about the video content: ")
+
+    # Retrieve relevant chunks
+    top_chunks = retrieve(query, index, chunks_db, embedder)
+
+    print("\nRetrieved context chunks:")
+    for c in top_chunks:
+        print(f"- {c}\n")
+
+    # Combine chunks for QA
+    context = " ".join(top_chunks)
+
+    # Extract exact answer span
+    result = qa_extractor(question=query, context=context)
+
+    print(f"\nExtracted answer: {result['answer']}")
+    print(f"Answer confidence score: {result['score']:.4f}")
+
+if __name__ == "__main__":
+    main()
